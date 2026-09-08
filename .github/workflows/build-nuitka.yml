@@ -37,7 +37,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y patchelf ccache
+          sudo apt-get install -y patchelf ccache unzip
 
       - name: Install Python dependencies
         run: |
@@ -56,7 +56,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka \
+          unzip tmp.zip && python -m nuitka \
             --standalone \
             --onefile \
             --output-filename=art \
