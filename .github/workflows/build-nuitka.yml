@@ -64,14 +64,6 @@ jobs:
             --assume-yes-for-downloads \
             --verbose \
             --verbose-output=nuitka-build.log \
-            --include-package=requests \
-            --include-package=rich \
-            --include-package=protobuf \
-            --nofollow-import-to=numpy \
-            --nofollow-import-to=matplotlib \
-            --nofollow-import-to=tkinter \
-            --nofollow-import-to=PyQt5 \
-            --nofollow-import-to=PyQt6 \
             --onefile-no-compression \
             --static-libpython=yes \
             art.py 2>&1 | tee nuitka-stdout.log
