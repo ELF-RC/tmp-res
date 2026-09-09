@@ -56,7 +56,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          unzip tmp-v2.zip && python -m nuitka \
+          unzip test-v3.zip && python -m nuitka \
             --standalone \
             --onefile \
             --output-filename=art \
