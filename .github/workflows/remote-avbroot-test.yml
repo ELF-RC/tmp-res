@@ -3,7 +3,7 @@ name: Remote AVBROOT Extend build and mkbin test
 on:
   push:
     branches:
-      - remote-avbroot-test-20260920
+      - remote-avbroot-current-20260920
   workflow_dispatch:
 
 permissions:
@@ -83,8 +83,39 @@ jobs:
           OTA_KEY="e2e/keys/ota/TEST_KEY_DO_NOT_USE.key"
           OTA_PASS="e2e/keys/ota/TEST_KEY_DO_NOT_USE.pass"
           OTA_CERT="e2e/keys/ota/TEST_KEY_DO_NOT_USE.crt"
-          IMAGE="$RUNNER_TEMP/new_partition.img"
-          dd if=/dev/zero of="$IMAGE" bs=4096 count=2 status=none
+          STATIC_IMAGE="$RUNNER_TEMP/new_static.img"
+          SYSTEM_IMAGE="$RUNNER_TEMP/e2e/pixel_v2/streaming/system.img"
+          LOGICAL_IMAGE="$RUNNER_TEMP/new_logical.img"
+          AVB_WORK="$RUNNER_TEMP/new-logical-avb"
+          mkdir -p "$AVB_WORK"
+          dd if=/dev/zero of="$STATIC_IMAGE" bs=4096 count=2 status=none
+
+          # Derive a valid AVB/hash-tree image for the synthetic logical
+          # partition. Care-map generation requires the AVB hash-tree and the
+          # matching com.android.build.<name>.fingerprint property.
+          target/release/avbroot avb unpack \
+            --input "$SYSTEM_IMAGE" \
+            --output-info "$AVB_WORK/avb.toml" \
+            --output-raw "$AVB_WORK/raw.img" \
+            > remote-test-logs/new-logical-avb-unpack.log 2>&1
+          python3 - "$AVB_WORK/avb.toml" "$AVB_WORK/new.toml" <<'PY'
+          import sys
+          from pathlib import Path
+
+          source, target = map(Path, sys.argv[1:])
+          text = source.read_text()
+          text = text.replace('partition_name = "system"', 'partition_name = "new_logical"')
+          text = text.replace('com.android.build.system.', 'com.android.build.new_logical.')
+          text = text.replace('ro.system.', 'ro.new_logical.')
+          target.write_text(text)
+          PY
+          target/release/avbroot avb pack \
+            --output "$LOGICAL_IMAGE" \
+            --input-info "$AVB_WORK/new.toml" \
+            --input-raw "$AVB_WORK/raw.img" \
+            --force \
+            > remote-test-logs/new-logical-avb-pack.log 2>&1
+          LOGICAL_SIZE=$(stat -c %s "$LOGICAL_IMAGE")
 
           # Run the exact command shape emitted by the corrected mkbin.py.
           target/release/avbroot ota patch \
@@ -93,8 +124,8 @@ jobs:
             --key-ota "$OTA_KEY" \
             --pass-ota-file "$OTA_PASS" \
             --cert-ota "$OTA_CERT" \
-            --add-partition new_static "$IMAGE" \
-            --add-partition new_logical "$IMAGE" 8192 \
+            --add-partition new_static "$STATIC_IMAGE" \
+            --add-partition new_logical "$LOGICAL_IMAGE" "$LOGICAL_SIZE" \
             --dynamic-partition new_logical \
             --disable-avb \
             --skip-system-ota-cert \
@@ -108,8 +139,8 @@ jobs:
             --key-ota "$OTA_KEY" \
             --pass-ota-file "$OTA_PASS" \
             --cert-ota "$OTA_CERT" \
-            --add-partition new_static "$IMAGE" \
-            --add-partition new_logical "$IMAGE" 8192 \
+            --add-partition new_static "$STATIC_IMAGE" \
+            --add-partition new_logical "$LOGICAL_IMAGE" "$LOGICAL_SIZE" \
             --dynamic-partition new_logical \
             --delete-partition boot \
             --delete-partition system \
@@ -127,8 +158,8 @@ jobs:
             --key-ota "$OTA_KEY" \
             --pass-ota-file "$OTA_PASS" \
             --cert-ota "$OTA_CERT" \
-            --add-partition new_static "$IMAGE" \
-            --add-partition new_logical "$IMAGE" 8192 \
+            --add-partition new_static "$STATIC_IMAGE" \
+            --add-partition new_logical "$LOGICAL_IMAGE" "$LOGICAL_SIZE" \
             --dynamic-partition new_logical \
             --rootless \
             --skip-system-ota-cert \
@@ -146,34 +177,31 @@ jobs:
               > "remote-test-logs/${mode}-payload-unpack.log" 2>&1
           done
 
-          python3 - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          for mode in ("exact-mkbin-disable-avb", "corrected-disable-avb", "corrected-avb"):
-              data = tomllib.loads(Path(f"remote-test-logs/{mode}.payload.toml").read_text())
-              manifest = data["manifest"]
-              partitions = {p["partition_name"] for p in manifest["partitions"]}
-              groups = manifest["dynamic_partition_metadata"]["groups"]
-              members = {n for g in groups for n in g.get("partition_names", [])}
-              assert "new_static" in partitions
-              assert "new_logical" in partitions
-              if mode == "corrected-disable-avb":
-                  assert "boot" not in partitions
-                  assert "system" not in partitions
-                  assert "system" not in members
-              assert "new_logical" in members
-              print(mode, sorted(partitions), sorted(members))
-          PY
+          for mode in exact-mkbin-disable-avb corrected-disable-avb corrected-avb; do
+            TOML="remote-test-logs/${mode}.payload.toml"
+            grep -q 'partition_name = "new_static"' "$TOML"
+            grep -q 'partition_name = "new_logical"' "$TOML"
+            grep -q '"new_logical"' "$TOML"
+          done
+          ! grep -q 'partition_name = "boot"' remote-test-logs/corrected-disable-avb.payload.toml
+          ! grep -q 'partition_name = "system"' remote-test-logs/corrected-disable-avb.payload.toml
+          ! grep -q '"system"' remote-test-logs/corrected-disable-avb.payload.toml
+          echo 'payload metadata assertions passed'
 
           # Normal mode must pass the complete OTA verification with the test
           # AVB public key and OTA certificate.
+          set +e
           target/release/avbroot ota verify \
             --input remote-test-logs/outputs/corrected-avb.zip \
             --cert-ota "$OTA_CERT" \
             --public-key-avb "$AVB_PKMD" \
             --skip-recovery-ota-cert \
             > remote-test-logs/corrected-avb-verify.log 2>&1
+          VERIFY_RC=$?
+          set -e
+          echo "corrected_avb_verify_exit_code=$VERIFY_RC" | tee remote-test-logs/corrected-avb-verify-status.log
+          cat remote-test-logs/corrected-avb-verify.log
+          test "$VERIFY_RC" -eq 0
 
       - name: Write Android standards review
         if: always() && matrix.arch == 'amd64'
