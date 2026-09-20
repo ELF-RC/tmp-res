@@ -199,12 +199,18 @@ jobs:
 
           # Normal mode must pass the complete OTA verification with the test
           # AVB public key and OTA certificate.
+          set +e
           target/release/avbroot ota verify \
             --input remote-test-logs/outputs/corrected-avb.zip \
             --cert-ota "$OTA_CERT" \
             --public-key-avb "$AVB_PKMD" \
             --skip-recovery-ota-cert \
             > remote-test-logs/corrected-avb-verify.log 2>&1
+          VERIFY_RC=$?
+          set -e
+          echo "corrected_avb_verify_exit_code=$VERIFY_RC" | tee remote-test-logs/corrected-avb-verify-status.log
+          cat remote-test-logs/corrected-avb-verify.log
+          test "$VERIFY_RC" -eq 0
 
       - name: Write Android standards review
         if: always() && matrix.arch == 'amd64'
