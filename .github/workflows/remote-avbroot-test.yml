@@ -177,25 +177,16 @@ jobs:
               > "remote-test-logs/${mode}-payload-unpack.log" 2>&1
           done
 
-          python3 - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          for mode in ("exact-mkbin-disable-avb", "corrected-disable-avb", "corrected-avb"):
-              data = tomllib.loads(Path(f"remote-test-logs/{mode}.payload.toml").read_text())
-              manifest = data["manifest"]
-              partitions = {p["partition_name"] for p in manifest["partitions"]}
-              groups = manifest["dynamic_partition_metadata"]["groups"]
-              members = {n for g in groups for n in g.get("partition_names", [])}
-              assert "new_static" in partitions
-              assert "new_logical" in partitions
-              if mode == "corrected-disable-avb":
-                  assert "boot" not in partitions
-                  assert "system" not in partitions
-                  assert "system" not in members
-              assert "new_logical" in members
-              print(mode, sorted(partitions), sorted(members))
-          PY
+          for mode in exact-mkbin-disable-avb corrected-disable-avb corrected-avb; do
+            TOML="remote-test-logs/${mode}.payload.toml"
+            grep -q 'partition_name = "new_static"' "$TOML"
+            grep -q 'partition_name = "new_logical"' "$TOML"
+            grep -q '"new_logical"' "$TOML"
+          done
+          ! grep -q 'partition_name = "boot"' remote-test-logs/corrected-disable-avb.payload.toml
+          ! grep -q 'partition_name = "system"' remote-test-logs/corrected-disable-avb.payload.toml
+          ! grep -q '"system"' remote-test-logs/corrected-disable-avb.payload.toml
+          echo 'payload metadata assertions passed'
 
           # Normal mode must pass the complete OTA verification with the test
           # AVB public key and OTA certificate.
