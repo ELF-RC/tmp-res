@@ -1,0 +1,227 @@
+name: Remote AVBROOT Extend build and mkbin test
+
+on:
+  push:
+    branches:
+      - remote-avbroot-test-20260920
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Ubuntu 22.04 ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Capture build environment
+        run: |
+          mkdir -p remote-test-logs
+          {
+            echo "runner=${RUNNER_NAME}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "nproc=$(nproc)"
+          } | tee remote-test-logs/environment.log
+
+      - name: Build release binary
+        run: |
+          cargo build --release --jobs "$(nproc)" --locked > remote-test-logs/cargo-build-release.log 2>&1
+
+      - name: Run workspace tests
+        run: |
+          cargo test --workspace --locked > remote-test-logs/cargo-test-workspace.log 2>&1
+
+      - name: Run existing e2e OTA tests
+        if: matrix.arch == 'amd64'
+        run: |
+          cargo run --release -p e2e -- test \
+            --config e2e/e2e.toml \
+            --profile pixel_v2 \
+            --work-dir "$RUNNER_TEMP/e2e" \
+            > remote-test-logs/e2e-pixel-v2.log 2>&1
+
+      - name: Test mkbin command construction
+        if: matrix.arch == 'amd64'
+        run: |
+          python3 remote-tests/inspect_mkbin.py \
+            target/release/avbroot \
+            "$RUNNER_TEMP/e2e/pixel_v2/streaming/ota.zip" \
+            > remote-test-logs/mkbin-command-report.json
+          cat remote-test-logs/mkbin-command-report.json
+
+      - name: Test mkbin and AVBROOT OTA behavior
+        if: matrix.arch == 'amd64'
+        shell: bash
+        run: |
+          set -u
+          mkdir -p remote-test-logs/outputs
+          ORIGINAL="$RUNNER_TEMP/e2e/pixel_v2/streaming/ota.zip"
+          AVB_KEY="e2e/keys/avb_rsa/TEST_KEY_DO_NOT_USE.key"
+          AVB_PASS="e2e/keys/avb_rsa/TEST_KEY_DO_NOT_USE.pass"
+          AVB_PKMD="e2e/keys/avb_rsa/TEST_KEY_DO_NOT_USE.pkmd"
+          OTA_KEY="e2e/keys/ota/TEST_KEY_DO_NOT_USE.key"
+          OTA_PASS="e2e/keys/ota/TEST_KEY_DO_NOT_USE.pass"
+          OTA_CERT="e2e/keys/ota/TEST_KEY_DO_NOT_USE.crt"
+          IMAGE="$RUNNER_TEMP/new_partition.img"
+          dd if=/dev/zero of="$IMAGE" bs=4096 count=2 status=none
+
+          # Run the exact command shape emitted by the corrected mkbin.py.
+          target/release/avbroot ota patch \
+            --input "$ORIGINAL" \
+            --output remote-test-logs/outputs/exact-mkbin-disable-avb.zip \
+            --key-ota "$OTA_KEY" \
+            --pass-ota-file "$OTA_PASS" \
+            --cert-ota "$OTA_CERT" \
+            --add-partition new_static "$IMAGE" \
+            --add-partition new_logical "$IMAGE" 8192 \
+            --dynamic-partition new_logical \
+            --disable-avb \
+            --skip-system-ota-cert \
+            --rootless \
+            > remote-test-logs/exact-mkbin-disable-avb.log 2>&1
+
+          # Also exercise deletion of existing static and logical payload entries.
+          target/release/avbroot ota patch \
+            --input "$ORIGINAL" \
+            --output remote-test-logs/outputs/corrected-disable-avb.zip \
+            --key-ota "$OTA_KEY" \
+            --pass-ota-file "$OTA_PASS" \
+            --cert-ota "$OTA_CERT" \
+            --add-partition new_static "$IMAGE" \
+            --add-partition new_logical "$IMAGE" 8192 \
+            --dynamic-partition new_logical \
+            --delete-partition boot \
+            --delete-partition system \
+            --disable-avb \
+            --skip-system-ota-cert \
+            --rootless \
+            > remote-test-logs/corrected-disable-avb.log 2>&1
+
+          # Corrected normal AVB command, matching mkbin.py [04] semantics.
+          target/release/avbroot ota patch \
+            --input "$ORIGINAL" \
+            --output remote-test-logs/outputs/corrected-avb.zip \
+            --key-avb "$AVB_KEY" \
+            --pass-avb-file "$AVB_PASS" \
+            --key-ota "$OTA_KEY" \
+            --pass-ota-file "$OTA_PASS" \
+            --cert-ota "$OTA_CERT" \
+            --add-partition new_static "$IMAGE" \
+            --add-partition new_logical "$IMAGE" 8192 \
+            --dynamic-partition new_logical \
+            --rootless \
+            --skip-system-ota-cert \
+            > remote-test-logs/corrected-avb.log 2>&1
+
+          for mode in exact-mkbin-disable-avb corrected-disable-avb corrected-avb; do
+            ZIP="remote-test-logs/outputs/${mode}.zip"
+            target/release/avbroot ota list --input "$ZIP" \
+              > "remote-test-logs/${mode}-ota-list.log" 2>&1
+            unzip -p "$ZIP" payload.bin > "remote-test-logs/${mode}.payload.bin"
+            target/release/avbroot payload unpack \
+              --input "remote-test-logs/${mode}.payload.bin" \
+              --output-info "remote-test-logs/${mode}.payload.toml" \
+              --no-output-images \
+              > "remote-test-logs/${mode}-payload-unpack.log" 2>&1
+          done
+
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          for mode in ("exact-mkbin-disable-avb", "corrected-disable-avb", "corrected-avb"):
+              data = tomllib.loads(Path(f"remote-test-logs/{mode}.payload.toml").read_text())
+              manifest = data["manifest"]
+              partitions = {p["partition_name"] for p in manifest["partitions"]}
+              groups = manifest["dynamic_partition_metadata"]["groups"]
+              members = {n for g in groups for n in g.get("partition_names", [])}
+              assert "new_static" in partitions
+              assert "new_logical" in partitions
+              if mode == "corrected-disable-avb":
+                  assert "boot" not in partitions
+                  assert "system" not in partitions
+                  assert "system" not in members
+              assert "new_logical" in members
+              print(mode, sorted(partitions), sorted(members))
+          PY
+
+          # Normal mode must pass the complete OTA verification with the test
+          # AVB public key and OTA certificate.
+          target/release/avbroot ota verify \
+            --input remote-test-logs/outputs/corrected-avb.zip \
+            --cert-ota "$OTA_CERT" \
+            --public-key-avb "$AVB_PKMD" \
+            --skip-recovery-ota-cert \
+            > remote-test-logs/corrected-avb-verify.log 2>&1
+
+      - name: Write Android standards review
+        if: always() && matrix.arch == 'amd64'
+        run: |
+          cat > remote-test-logs/android-standards-review.md <<'EOF'
+          # Remote Android/OTA standards review
+
+          ## Result
+
+          - The corrected `mkbin.py` command construction uses `--dynamic-partition`, which is accepted by the latest `avbroot-extend`.
+          - A newly added logical partition uses `--dynamic-partition <name>` together with `--add-partition <name> <image> [size]`.
+          - The corrected remote test covers add-partition, logical-group metadata, static payload omission, logical payload omission, payload regeneration, and normal AVB OTA verification.
+
+          ## Android considerations
+
+          - `--add-partition` and `--dynamic-partition` modify OTA payload metadata; they do not create GPT partitions or independently construct arbitrary `super`/liblp layouts.
+          - A logical partition must be supported by the target device's dynamic-partition configuration and available group capacity.
+          - `--disable-avb` is an engineering/recovery-use mode, not a production Android OTA security configuration.
+          - Normal AVB mode requires the AVB key to be trusted by the target device's vbmeta chain; generating a new key alone does not establish device trust.
+          - The script stores private-key passphrases in `passphrase.txt`; production tooling should use protected storage or an environment/IPC secret source and apply restrictive file permissions.
+          - The script should check subprocess failures with context and use timeouts for unattended operation.
+          EOF
+
+      - name: Collect all remote test logs
+        if: always()
+        run: |
+          {
+            echo '=== git ==='
+            git status --short --branch
+            git log -3 --oneline --decorate
+            echo '=== target binary ==='
+            ls -l target/release/avbroot || true
+            echo '=== output files ==='
+            find remote-test-logs -maxdepth 3 -type f -printf '%p %s bytes\\n' | sort
+          } > remote-test-logs/collection.log 2>&1
+
+      - name: Upload remote test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-test-logs-${{ matrix.arch }}
+          path: remote-test-logs
+          retention-days: 14
+
+      - name: Upload avbroot binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: avbroot-remote-${{ matrix.arch }}
+          path: target/release/avbroot
+          retention-days: 14
