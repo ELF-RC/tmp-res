@@ -15,7 +15,7 @@ base64 = "0.23.0"
 bitflags = { version = "2.4.1", features = ["serde"] }
 bstr = "1.6.2"
 bzip2 = "0.6.0"
-clap = { version = "4.4.1", features = ["derive"] }
+clap = { version = "4.4.1", features = ["derive", "unstable-v5"] }
 clap_complete = "4.4.0"
 # Waiting for stable release that's compatible with the rest of the newer
 # RustCrypto dependencies.
