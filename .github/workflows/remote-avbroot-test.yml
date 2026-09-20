@@ -84,9 +84,38 @@ jobs:
           OTA_PASS="e2e/keys/ota/TEST_KEY_DO_NOT_USE.pass"
           OTA_CERT="e2e/keys/ota/TEST_KEY_DO_NOT_USE.crt"
           STATIC_IMAGE="$RUNNER_TEMP/new_static.img"
-          LOGICAL_IMAGE="$RUNNER_TEMP/e2e/pixel_v2/streaming/system.img"
-          LOGICAL_SIZE=$(stat -c %s "$LOGICAL_IMAGE")
+          SYSTEM_IMAGE="$RUNNER_TEMP/e2e/pixel_v2/streaming/system.img"
+          LOGICAL_IMAGE="$RUNNER_TEMP/new_logical.img"
+          AVB_WORK="$RUNNER_TEMP/new-logical-avb"
+          mkdir -p "$AVB_WORK"
           dd if=/dev/zero of="$STATIC_IMAGE" bs=4096 count=2 status=none
+
+          # Derive a valid AVB/hash-tree image for the synthetic logical
+          # partition. Care-map generation requires the AVB hash-tree and the
+          # matching com.android.build.<name>.fingerprint property.
+          target/release/avbroot avb unpack \
+            --input "$SYSTEM_IMAGE" \
+            --output-info "$AVB_WORK/avb.toml" \
+            --output-raw "$AVB_WORK/raw.img" \
+            > remote-test-logs/new-logical-avb-unpack.log 2>&1
+          python3 - "$AVB_WORK/avb.toml" "$AVB_WORK/new.toml" <<'PY'
+          import sys
+          from pathlib import Path
+
+          source, target = map(Path, sys.argv[1:])
+          text = source.read_text()
+          text = text.replace('partition_name = "system"', 'partition_name = "new_logical"')
+          text = text.replace('com.android.build.system.', 'com.android.build.new_logical.')
+          text = text.replace('ro.system.', 'ro.new_logical.')
+          target.write_text(text)
+          PY
+          target/release/avbroot avb pack \
+            --output "$LOGICAL_IMAGE" \
+            --input-info "$AVB_WORK/new.toml" \
+            --input-raw "$AVB_WORK/raw.img" \
+            --force \
+            > remote-test-logs/new-logical-avb-pack.log 2>&1
+          LOGICAL_SIZE=$(stat -c %s "$LOGICAL_IMAGE")
 
           # Run the exact command shape emitted by the corrected mkbin.py.
           target/release/avbroot ota patch \
