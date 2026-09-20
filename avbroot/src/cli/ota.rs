@@ -2890,7 +2890,6 @@ pub struct PatchCli {
     #[arg(
         long,
         value_name = "PARTITION",
-        requires = "add_partition",
         help_heading = HEADING_PATH,
     )]
     pub dynamic_partition: Vec<String>,
