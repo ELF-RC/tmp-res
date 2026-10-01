@@ -1,8 +1,0 @@
-# Build
-pyinstaller
-
-# Runtime
-requests
-rich
-protobuf
-zstandard
